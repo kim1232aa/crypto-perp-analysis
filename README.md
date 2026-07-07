@@ -43,15 +43,17 @@ python3 scripts/alert.py ETH 1785 1796
 
 ## Install
 
-Clone into your Claude Code skills directory, then verify:
-
+**One-liner** (clone + self-check):
 ```bash
-# 1. clone into the skills dir (create it if missing)
+curl -fsSL https://raw.githubusercontent.com/kim1232aa/crypto-perp-analysis/main/install.sh | bash
+```
+
+**Or manually:**
+```bash
 mkdir -p ~/.claude/skills
 git clone https://github.com/kim1232aa/crypto-perp-analysis.git \
   ~/.claude/skills/crypto-perp-analysis
-
-# 2. verify — should print a live ETH report with real numbers and no errors
+# verify — should print a live ETH report with real numbers and no errors
 python3 ~/.claude/skills/crypto-perp-analysis/scripts/analyze.py ETH 5m
 ```
 
@@ -61,6 +63,15 @@ geo/network blocked, prefix with `HTTPS_PROXY=http://<your-proxy>:<port>`.
 After install, reload Claude Code (restart the session) so it discovers the
 skill, then ask for a 多空分析 / long-short read on any perp — it triggers
 automatically. Or run the scripts directly (see **Tools** above).
+
+## Not on Claude Code?
+
+The scripts are plain Python and work in **any** harness (Hermes, Codex, OpenAI/
+LangChain agents, cron, bare terminal) — nothing is Claude-specific except the
+`SKILL.md` auto-trigger. See **[AGENTS.md](AGENTS.md)** for the harness-neutral
+usage guide, or just run `python3 scripts/analyze.py --help`. Key rule for any
+agent: the report block between the `╔═╗` markers is **mandatory verbatim
+output** — don't summarize the panel table or drop the conclusion.
 
 ## Disclaimer
 

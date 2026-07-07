@@ -25,11 +25,16 @@ source fails you say so instead of inventing it.
 1. **NEVER write a number you did not get from `analyze.py`.** No made-up prices,
    RSI, support/resistance, funding, or ratios. If the script's `errors[]` is
    non-empty, state which source failed and analyze only what you have.
-2. **Always end with a risk line**: this is 技术分析 not 投资建议; 5M/15M are
-   high-noise; every scenario must carry a concrete stop-loss and a note to
-   control leverage.
-3. **Reply in the user's language** (this user: 中文 or 日本語 — never English).
-4. Data is a **snapshot**; prices move. Say so, and offer to re-run/monitor.
+2. **FORCED OUTPUT — the whole 报告块 is mandatory, verbatim.** Everything the
+   script prints between `╔═══ 报告块 ═══╗` and `╚═══ 报告块结束 ═══╝` MUST appear
+   in your reply. In particular you **MUST NOT** compress the **面板表** into prose
+   bullets or drop rows, and you **MUST** keep the **合并结论 / 建议(主策略) / 高胜率**
+   lines. Keep the 面板表 as a markdown table (renders as a box). Add narration
+   AROUND it — never instead of it.
+3. **Always end with a risk line**: this is 技术分析 not 投资建议; 5M/15M are
+   high-noise; every scenario carries a stop-loss + control-leverage note.
+4. **Reply in the user's language** (this user: 中文 or 日本語 — never English).
+5. Data is a **snapshot**; prices move. Say so, and offer to re-run/monitor.
 
 ## Step 1 — Fetch real data (mandatory first action)
 
@@ -135,13 +140,14 @@ Weight (high→low): `多周期共振(信心)` ≈ `OI×价 组合` ≈ `top_pos
 
 ## Step 4 — Output (in user's language)
 
-1. **Relay the 报告块 verbatim** (快照 + 面板表 + 关键位 + 情景剧本 + 总开关 + 免责).
-   Do NOT alter any number. Translate labels to the user's language if needed.
-2. **Add 关键信号解读** — 2~4 lines the script can't write: the *story* joining the
-   tags. e.g. "主力持仓比在加多 + taker买盘 → 某个下影是买盘防守，不是空头没力";
-   "散户拥挤多，止损堆在总开关下方 → 破位=踩踏燃料"。这是弱agent之外你要贡献的增量。
-3. **Pick the play** — 说明哪个情景是首选、哪个最高胜率，并**引用具体信号**支撑。
-4. **Caveat + offer** — 非投资建议已在报告块内；再提议做 5 分钟自动监控盯触发位。
+1. **Relay the ENTIRE 报告块 verbatim** — 快照 + 多周期共振 + 面板表 + 跨所资金费 +
+   关键位 + 情景剧本 + 总开关 + **合并结论 / 建议 / 高胜率**. Keep the 面板表 as a
+   markdown table. Do NOT alter a number, drop a row, or turn the table into prose.
+2. **Add 关键信号解读** — 2~4 lines ON TOP of (not replacing) the block: the *story*
+   joining tags. e.g. "主力加多 + taker买盘 → 下影是买盘防守，不是空头没力"。
+3. **The script already picks the play** (建议/主策略/高胜率是脚本生成的); reinforce
+   it with reasoning if useful, but never contradict, omit, or overwrite it.
+4. **Caveat + offer** — 非投资建议已在报告块内；再提议 5 分钟自动监控 (alert.py)。
 
 Note on the 情景剧本 R:R: stops = 1.2×ATR, targets = structure/ATR projection.
 若 R:R 高得离谱(如 >1:6)或四行RR接近相同，通常是价格贴近窗口高/低点(结构压缩,脚本会

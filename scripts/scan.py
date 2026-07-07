@@ -10,6 +10,18 @@ Usage:
 import sys
 import perp_core as pc
 
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
+    print("""scan.py — 多币批量扫描,按机械评分排名找 setup(实时真实数据)
+
+用法: python3 scan.py [SYM1,SYM2,...] [BAR]
+  默认: BTC,ETH,SOL,BNB,XRP,DOGE  15m
+  例:   python3 scan.py ETH,BTC,SOL 5m
+
+输出: 排名表(偏多在上): 现价/24h%/RSI/评分/基调/主导信号,并点名最偏多·最偏空。
+轻量版(仅价格+衍生品,不含盘口/多周期)。深入某币: python3 analyze.py <SYM> <BAR>
+铁律: 只用真实数据,失败=数据不足不编造; 评分为量化参考·非投资建议。""")
+    sys.exit(0)
+
 syms = (sys.argv[1].upper().split(",") if len(sys.argv) > 1
         else ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"])
 BAR = sys.argv[2] if len(sys.argv) > 2 else "15m"

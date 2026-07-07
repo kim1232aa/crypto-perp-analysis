@@ -11,8 +11,17 @@ the loop should surface the line and highlight when status starts with 🔴/🟢
 import sys
 import perp_core as pc
 
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
+    print("""alert.py — 触发位监控,一发式检查(配 /loop 做5分钟自动盯盘)
+
+用法: python3 alert.py SYMBOL SUPPORT RESISTANCE
+  例: python3 alert.py ETH 1785 1796
+输出一行: 🔴破位(跌破支撑) / 🟢突破(站上阻力) / ⚪区间内(含位置%)
+配合 /loop: /loop 5m python3 <path>/alert.py ETH 1785 1796
+SUPPORT/RESISTANCE 通常取自 analyze.py 的 总开关支撑 / 突破阻力。""")
+    sys.exit(0)
 if len(sys.argv) < 4:
-    print("用法: python3 alert.py SYMBOL SUPPORT RESISTANCE"); sys.exit(2)
+    print("用法: python3 alert.py SYMBOL SUPPORT RESISTANCE  (-h 看详情)"); sys.exit(2)
 SYM = sys.argv[1].upper()
 support = float(sys.argv[2]); resistance = float(sys.argv[3])
 
