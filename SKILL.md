@@ -22,6 +22,12 @@ source fails you say so instead of inventing it.
 
 ## Iron rules (do not break)
 
+0. **SETUP = NONE. No API key, no pip install.** Python 3 stdlib (`urllib`) only,
+   over PUBLIC OKX/Binance/Bybit REST endpoints. **NEVER ask the user for an API
+   key / secret / token — none exists.** There is no `PERP_API_KEY`; this is
+   crypto perpetual *futures*, NOT "Perpetual Protocol". Do NOT `pip install
+   requests` (unused). If data won't load it is **network/geo-blocking, not
+   auth** → retry with `HTTPS_PROXY=http://<proxy>:<port>`. Just run the script.
 1. **NEVER write a number you did not get from `analyze.py`.** No made-up prices,
    RSI, support/resistance, funding, or ratios. If the script's `errors[]` is
    non-empty, state which source failed and analyze only what you have.

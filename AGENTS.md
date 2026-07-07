@@ -19,6 +19,13 @@ Non-SKILL.md harnesses (LangChain, cron, bare shell): just run the scripts below
 Live crypto perpetual-futures long/short analysis. Pure Python 3 stdlib, no deps,
 no API keys. Data from public OKX / Binance / Bybit REST endpoints.
 
+## ⛔ SETUP = NONE — do not invent requirements
+**No API key. No secret. No pip install.** `PERP_API_KEY` and the like DO NOT
+EXIST — this is crypto perpetual *futures*, NOT the "Perpetual Protocol" DEX.
+The code uses `urllib` (stdlib), not `requests`. **Never ask the user for a key.**
+If a script prints no data, it is **network/geo-blocking, not auth** → retry with
+`HTTPS_PROXY=http://<proxy>:<port>`. Your only job is to RUN the script.
+
 ## Run it
 ```bash
 python3 scripts/analyze.py ETH 5m      # detailed single-symbol report
