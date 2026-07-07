@@ -64,14 +64,32 @@ After install, reload Claude Code (restart the session) so it discovers the
 skill, then ask for a 多空分析 / long-short read on any perp — it triggers
 automatically. Or run the scripts directly (see **Tools** above).
 
-## Not on Claude Code?
+## Works in Claude Code · Codex · OpenClaw · Hermes
 
-The scripts are plain Python and work in **any** harness (Hermes, Codex, OpenAI/
-LangChain agents, cron, bare terminal) — nothing is Claude-specific except the
-`SKILL.md` auto-trigger. See **[AGENTS.md](AGENTS.md)** for the harness-neutral
-usage guide, or just run `python3 scripts/analyze.py --help`. Key rule for any
-agent: the report block between the `╔═╗` markers is **mandatory verbatim
-output** — don't summarize the panel table or drop the conclusion.
+`SKILL.md` is a **cross-agent standard** — the same skill folder auto-discovers in
+all four. Only the install directory differs:
+
+| Harness | Skill dir | Install |
+|---|---|---|
+| **Claude Code** | `~/.claude/skills/` | `bash install.sh claude` |
+| **Codex CLI** | `~/.codex/skills/` (or `.codex/skills/` per-repo) | `bash install.sh codex` |
+| **OpenClaw** | `~/.openclaw/skills/` (or workspace `skills/`) | `bash install.sh openclaw` |
+| **Hermes** | `~/.hermes/skills/` (or project `skills/`) | `bash install.sh hermes` |
+
+```bash
+# auto-detect installed harnesses and install into each:
+curl -fsSL https://raw.githubusercontent.com/kim1232aa/crypto-perp-analysis/main/install.sh | bash
+# or all four at once:  bash install.sh all
+```
+
+Nothing is Claude-specific: the four `.py` scripts are plain stdlib and run in any
+harness, a cron, or a bare terminal. `agents/openai.yaml` gives Codex a nicer name
+(ignored elsewhere); `AGENTS.md` is the harness-neutral guide (Codex & OpenClaw
+also read it). Restart the agent after install so it discovers the skill.
+
+**Key rule for any agent**: the report block between the `╔═╗` markers is
+**mandatory verbatim output** — don't summarize the panel table or drop the
+conclusion. See **[AGENTS.md](AGENTS.md)** or `python3 scripts/analyze.py --help`.
 
 ## Disclaimer
 

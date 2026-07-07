@@ -1,0 +1,6 @@
+# Codex CLI appearance metadata (optional; ignored by other harnesses).
+# Verified format from openai/skills .curated examples.
+interface:
+  display_name: "Crypto Perp Analysis"
+  short_description: "Live ETH/BTC/SOL/... perp long-short read (OKX/Binance/Bybit): OI, funding, L/S ratios, RSI/ATR, multi-TF resonance, orderbook."
+  default_prompt: "Give me a 多空分析 / long-short read on the ETH perpetual, 5m timeframe."

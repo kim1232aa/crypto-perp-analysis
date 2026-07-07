@@ -1,8 +1,19 @@
 # AGENTS.md — how ANY agent should use this tool
 
-Harness-neutral guide (Claude Code, Hermes, Codex, OpenAI/LangChain agents, cron,
-or a bare terminal). Claude Code users: `SKILL.md` auto-triggers this; other
-harnesses: read this file, run the scripts. The Python is **not** Claude-specific.
+Harness-neutral guide (Claude Code, Codex, OpenClaw, Hermes, OpenAI/LangChain
+agents, cron, or a bare terminal). `SKILL.md` is a **cross-agent standard**, so the
+same folder auto-discovers in every harness that supports it — only the install
+dir differs. The Python is **not** Claude-specific.
+
+| Harness | Skill dir (drop the folder here) | Frontmatter it reads |
+|---|---|---|
+| Claude Code | `~/.claude/skills/` | `name`, `description` |
+| Codex CLI | `~/.codex/skills/` · repo `.codex/skills/` | `name`, `description` (+ optional `agents/openai.yaml`) |
+| OpenClaw | `~/.openclaw/skills/` · workspace `skills/` | `name`, `description` |
+| Hermes | `~/.hermes/skills/` · project `skills/` | `description` (activation) |
+
+Install helper: `bash install.sh <claude|codex|openclaw|hermes|all|auto>`.
+Non-SKILL.md harnesses (LangChain, cron, bare shell): just run the scripts below.
 
 ## What it is
 Live crypto perpetual-futures long/short analysis. Pure Python 3 stdlib, no deps,
