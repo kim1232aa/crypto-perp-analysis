@@ -43,15 +43,24 @@ python3 scripts/alert.py ETH 1785 1796
 
 ## Install
 
-Clone into your Claude Code skills directory:
+Clone into your Claude Code skills directory, then verify:
 
 ```bash
+# 1. clone into the skills dir (create it if missing)
+mkdir -p ~/.claude/skills
 git clone https://github.com/kim1232aa/crypto-perp-analysis.git \
   ~/.claude/skills/crypto-perp-analysis
+
+# 2. verify — should print a live ETH report with real numbers and no errors
+python3 ~/.claude/skills/crypto-perp-analysis/scripts/analyze.py ETH 5m
 ```
 
-Then ask Claude Code for a 多空分析 / long-short read on any perp and the skill
-triggers automatically.
+No dependencies, no API keys — Python 3 stdlib only. If the exchanges are
+geo/network blocked, prefix with `HTTPS_PROXY=http://<your-proxy>:<port>`.
+
+After install, reload Claude Code (restart the session) so it discovers the
+skill, then ask for a 多空分析 / long-short read on any perp — it triggers
+automatically. Or run the scripts directly (see **Tools** above).
 
 ## Disclaimer
 
