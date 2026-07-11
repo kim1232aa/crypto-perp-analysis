@@ -1,63 +1,97 @@
 #!/usr/bin/env python3
-"""
-scan.py :: batch watchlist scanner. Ranks coins by 机械评分 to surface setups.
+"""Batch evidence scanner; it refuses to rank a partially populated score."""
+import argparse
 
-Usage:
-    python3 scan.py                       # default list, 15m
-    python3 scan.py ETH,BTC,SOL,BNB 5m
-    python3 scan.py BTC,ETH,SOL,DOGE,XRP,AVAX,LINK 1H
-"""
-import sys
 import perp_core as pc
 
-if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
-    print("""scan.py — 多币批量扫描,按机械评分排名找 setup(实时真实数据)
 
-用法: python3 scan.py [SYM1,SYM2,...] [BAR]
-  默认: BTC,ETH,SOL,BNB,XRP,DOGE  15m
-  例:   python3 scan.py ETH,BTC,SOL 5m
+VALID_BARS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
+OKX_BAR = {"1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D"}
 
-输出: 排名表(偏多在上): 现价/24h%/RSI/评分/基调/主导信号,并点名最偏多·最偏空。
-轻量版(仅价格+衍生品,不含盘口/多周期)。深入某币: python3 analyze.py <SYM> <BAR>
-铁律: 只用真实数据,失败=数据不足不编造; 评分为量化参考·非投资建议。""")
-    sys.exit(0)
 
-syms = (sys.argv[1].upper().split(",") if len(sys.argv) > 1
-        else ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"])
-BAR = sys.argv[2] if len(sys.argv) > 2 else "15m"
-PERIOD = BAR if BAR in {"5m","15m","30m","1h","2h","4h","6h","12h","1d"} else "15m"
+def bar_arg(value):
+    bar = value.lower()
+    if bar not in VALID_BARS:
+        raise argparse.ArgumentTypeError(f"周期必须是: {', '.join(VALID_BARS)}")
+    return bar
 
-results = []
-for s in syms:
-    errs = []
-    price = pc.okx_price(s, errs)
-    cd = pc.okx_candles(s, BAR, 60, errs)
-    lv = pc.build_levels(cd)
-    dv = pc.bn_derivs(s, PERIOD, errs)
-    if not price or not lv:
-        results.append((s, None, None, None, None, None, "数据不足/获取失败")); continue
-    rows, total, bias = pc.signal_rows(price["last"], lv, dv)
-    # one-line reason: strongest 2 signals
-    strong = sorted(rows, key=lambda r: -abs(r[3]))[:2]
-    reason = " / ".join(f"{r[0]}:{r[2]}" for r in strong if r[3] != 0) or "信号平淡"
-    results.append((s, price["last"], price["chg24h_pct"], lv.get("rsi14"), total, bias, reason))
 
-# rank: bullish first (desc score); failed rows last
-ok = [r for r in results if r[4] is not None]
-bad = [r for r in results if r[4] is None]
-ok.sort(key=lambda r: -r[4])
-g = pc._fmt
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="多币结构化证据扫描；只有核心数据齐全的币才参与评分排名。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("symbols", nargs="?", default="BTC,ETH,SOL,BNB,XRP,DOGE", help="逗号分隔币种")
+    parser.add_argument("bar", nargs="?", type=bar_arg, default="15m", help="周期")
+    return parser.parse_args()
 
-print(f"===== 多币扫描 · {BAR} · 按机械评分排名(偏多在上) =====\n")
-print("| 排名 | 币 | 现价 | 24h% | RSI | 评分 | 基调 | 主导信号 |")
-print("|---|---|---|---|---|---|---|---|")
-for i, (s, p, c, r, t, b, reason) in enumerate(ok, 1):
-    print(f"| {i} | {s} | {g(p)} | {g(c)} | {g(r,0)} | {g(t)} | {b} | {reason} |")
-for s, *_ , reason in bad:
-    print(f"| — | {s} | — | — | — | — | — | {reason} |")
 
-if ok:
-    top, bot = ok[0], ok[-1]
-    print(f"\n**最偏多：{top[0]} (评分 {g(top[4])}, {top[5]})** ｜ **最偏空：{bot[0]} (评分 {g(bot[4])}, {bot[5]})**")
-    print(f"→ 想深入看某个币: `python3 analyze.py {top[0]} {BAR}`")
-print("\n⚠️ 评分为量化参考·非投资建议。扫描仅用价格+衍生品(未含盘口/多周期),深入分析请用 analyze.py。")
+def missing_primary_derivatives(deriv):
+    deriv = deriv or {}
+    required = {
+        "资金费": deriv.get("funding_rate_8h"),
+        "OI": deriv.get("oi_usd"),
+        "Binance全站账户比": (deriv.get("global_ls") or {}).get("ratio"),
+        "Binance头部持仓比": (deriv.get("top_position") or {}).get("ratio"),
+        "Taker": (deriv.get("taker_buysell") or {}).get("last"),
+    }
+    return [name for name, value in required.items() if value is None]
+
+
+def main():
+    args = parse_args()
+    symbols = [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()]
+    results = []
+
+    for symbol in symbols:
+        errors = []
+        price = pc.okx_price(symbol, errors)
+        candles = pc.okx_candles(symbol, OKX_BAR.get(args.bar, args.bar), 200, errors)
+        levels = pc.build_levels(candles)
+        deriv = pc.bn_derivs(symbol, args.bar, errors)
+        if not price or not levels:
+            results.append({"symbol": symbol, "status": "NO_TRADE", "reason": "缺少现价或30根已收盘K", "errors": errors})
+            continue
+        missing = missing_primary_derivatives(deriv)
+        rows, total, bias = pc.signal_rows(price["last"], levels, deriv)
+        strongest = sorted((row for row in rows if row[3] != 0), key=lambda row: -abs(row[3]))[:2]
+        reason = " / ".join(f"{row[0]}:{row[2]}" for row in strongest) or "信号平淡"
+        if missing:
+            results.append({
+                "symbol": symbol, "price": price["last"], "change": price["chg24h_pct"], "rsi": levels.get("rsi14"),
+                "status": "CAUTION", "score": None, "bias": "不排名", "reason": "核心缺失：" + "、".join(missing), "errors": errors,
+            })
+            continue
+        results.append({
+            "symbol": symbol, "price": price["last"], "change": price["chg24h_pct"], "rsi": levels.get("rsi14"),
+            "status": "READY", "score": total, "bias": bias, "reason": reason, "errors": errors,
+        })
+
+    ready = sorted((row for row in results if row["status"] == "READY"), key=lambda row: -row["score"])
+    other = [row for row in results if row["status"] != "READY"]
+    fmt = pc._fmt
+    print(f"===== 多币扫描 · {args.bar} · 仅 READY 数据参与机械评分排名 =====\n")
+    print("| 排名 | 币 | 数据状态 | 现价 | 24h% | RSI | 评分 | 偏向证据 | 说明 |")
+    print("|---|---|---|---:|---:|---:|---:|---|---|")
+    for index, row in enumerate(ready, 1):
+        print(
+            f"| {index} | {row['symbol']} | READY | {fmt(row['price'])} | {fmt(row['change'])} | "
+            f"{fmt(row['rsi'], 0)} | {fmt(row['score'])} | {row['bias']} | {row['reason']} |"
+        )
+    for row in other:
+        print(
+            f"| — | {row['symbol']} | {row['status']} | {fmt(row.get('price'))} | {fmt(row.get('change'))} | "
+            f"{fmt(row.get('rsi'), 0)} | — | 不排名 | {row['reason']} |"
+        )
+
+    if ready:
+        print(f"\n最偏多证据：{ready[0]['symbol']}（评分 {fmt(ready[0]['score'])}）｜最偏空证据：{ready[-1]['symbol']}（评分 {fmt(ready[-1]['score'])}）")
+        print(f"深入查看：python3 analyze.py {ready[0]['symbol']} {args.bar} --profile balanced")
+    else:
+        print("\n没有核心数据完整的标的；不输出方向排名。")
+    error_count = sum(len(row.get("errors", [])) for row in results)
+    print(f"\n⚠️ 扫描使用已收盘K和部分衍生品快照，非回测/非交易建议；共记录 {error_count} 项源错误。")
+
+
+if __name__ == "__main__":
+    main()

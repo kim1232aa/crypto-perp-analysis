@@ -62,11 +62,19 @@ for d in "${targets[@]}"; do
   [ -z "$first" ] && first="$path"
 done
 
-echo "→ self-check: analyze.py ETH 5m (needs network to OKX/Binance/Bybit)"
-if python3 "$first/scripts/analyze.py" ETH 5m 2>/dev/null | grep -q "报告块"; then
+echo "→ offline self-check: closed-candle/data-quality/alert semantics + backtest replay"
+if python3 -B -m unittest discover -s "$first/tests" -q && \
+   python3 -B "$first/scripts/backtest.py" --self-test >/dev/null; then
+  echo "✅ offline checks passed."
+else
+  echo "⚠️ installed, but offline checks failed; inspect the repository before relying on output."
+fi
+
+echo "→ live connectivity check: analyze.py ETH 5m (needs network to OKX/Binance/Bybit)"
+if python3 "$first/scripts/analyze.py" ETH 5m 2>/dev/null | grep -q "STRUCTURED EVIDENCE"; then
   echo "✅ works — live data reachable."
 else
-  echo "⚠️ installed, but self-check produced no 报告块 (exchanges may be geo/blocked)."
+  echo "⚠️ installed, but live check produced no structured evidence (exchanges may be geo/blocked)."
   echo "   retry: HTTPS_PROXY=http://<proxy>:<port> python3 $first/scripts/analyze.py ETH 5m"
 fi
 echo "→ restart your agent (Claude Code / Codex / OpenClaw / Hermes) to auto-discover the skill."

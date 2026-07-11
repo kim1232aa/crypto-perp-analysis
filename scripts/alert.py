@@ -1,40 +1,107 @@
 #!/usr/bin/env python3
-"""
-alert.py :: one-shot price-vs-trigger check for monitoring (wire into /loop).
+"""One-shot level monitor with explicit live-warning vs closed-candle semantics."""
+import argparse
 
-Usage:
-    python3 alert.py SYMBOL SUPPORT RESISTANCE
-    python3 alert.py ETH 1785 1796
-Prints a single concise status line. Designed to be re-run every 5m by /loop:
-the loop should surface the line and highlight when status starts with 🔴/🟢.
-"""
-import sys
 import perp_core as pc
 
-if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
-    print("""alert.py — 触发位监控,一发式检查(配 /loop 做5分钟自动盯盘)
 
-用法: python3 alert.py SYMBOL SUPPORT RESISTANCE
-  例: python3 alert.py ETH 1785 1796
-输出一行: 🔴破位(跌破支撑) / 🟢突破(站上阻力) / ⚪区间内(含位置%)
-配合 /loop: /loop 5m python3 <path>/alert.py ETH 1785 1796
-SUPPORT/RESISTANCE 通常取自 analyze.py 的 总开关支撑 / 突破阻力。""")
-    sys.exit(0)
-if len(sys.argv) < 4:
-    print("用法: python3 alert.py SYMBOL SUPPORT RESISTANCE  (-h 看详情)"); sys.exit(2)
-SYM = sys.argv[1].upper()
-support = float(sys.argv[2]); resistance = float(sys.argv[3])
+VALID_BARS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
+OKX_BAR = {"1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D"}
 
-errs = []
-price = pc.okx_price(SYM, errs)
-if not price:
-    print(f"⚠️ {SYM} 价格获取失败(不要编造): {'; '.join(errs)}"); sys.exit(1)
-last = price["last"]
-if last <= support:
-    status = f"🔴破位 {SYM} {last} 跌破支撑{support} → 转弱/破位空信号"
-elif last >= resistance:
-    status = f"🟢突破 {SYM} {last} 站上阻力{resistance} → 突破多信号"
-else:
-    pos = (last - support) / (resistance - support) * 100 if resistance > support else 0
-    status = f"⚪区间内 {SYM} {last}（支撑{support}~阻力{resistance}, 位置{pos:.0f}%）24h {price['chg24h_pct']:.2f}%"
-print(status)
+
+def bar_arg(value):
+    bar = value.lower()
+    if bar not in VALID_BARS:
+        raise argparse.ArgumentTypeError(f"周期必须是: {', '.join(VALID_BARS)}")
+    return bar
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="触发位监控：默认只给实时预警；--confirm-closed 才给已收盘确认。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("symbol", help="币种，例如 ETH")
+    parser.add_argument("support", type=float, help="支撑/下破观察位")
+    parser.add_argument("resistance", type=float, help="阻力/上破观察位")
+    parser.add_argument(
+        "--confirm-closed", type=bar_arg, metavar="BAR",
+        help="以指定周期的已收盘K确认；未指定时绝不输出交易触发",
+    )
+    parser.add_argument(
+        "--profile", choices=tuple(pc.PROFILES), default="balanced",
+        help="确认所需已收盘K根数；仅在 --confirm-closed 下使用",
+    )
+    args = parser.parse_args()
+    if args.support >= args.resistance:
+        parser.error("support 必须小于 resistance")
+    return args
+
+
+def main():
+    args = parse_args()
+    sym = args.symbol.upper()
+    profile = pc.profile_config(args.profile)
+    errors = []
+    price = pc.okx_price(sym, errors)
+    if not price or price.get("last") is None:
+        detail = "; ".join(errors) or "空响应"
+        print(f"⚠️ {sym} 价格获取失败（不生成信号）：{detail}")
+        return 1
+
+    last = price["last"]
+    live_state = "breakdown" if last <= args.support else "breakout" if last >= args.resistance else None
+
+    # Backwards-compatible positional invocation is intentionally a warning
+    # only. A live price can cross a level and reverse before a bar closes.
+    if not args.confirm_closed:
+        if live_state == "breakdown":
+            print(f"⚠️ 下破预警 {sym} {last} ≤ 支撑{args.support}：实时触价，未做已收盘确认；非交易触发。")
+        elif live_state == "breakout":
+            print(f"⚠️ 上破预警 {sym} {last} ≥ 阻力{args.resistance}：实时触价，未做已收盘确认；非交易触发。")
+        else:
+            position = (last - args.support) / (args.resistance - args.support) * 100
+            print(f"⚪区间内 {sym} {last}（支撑{args.support}~阻力{args.resistance}, 位置{position:.0f}%）24h {price['chg24h_pct']:.2f}%")
+        print("提示：如需已收盘确认，使用 --confirm-closed 5m（可配 --profile）。")
+        return 0
+
+    bar = args.confirm_closed
+    candles = pc.okx_candles(sym, OKX_BAR.get(bar, bar), max(5, profile["confirmed_closes"] + 2), errors)
+    closes = candles["closes"] if candles else []
+    confirmed = pc.level_confirmation(closes, args.support, args.resistance, profile["confirmed_closes"])
+    close_text = "—" if not closes else f"{closes[-1]}（ts {candles['timestamps'][-1]}）"
+
+    if confirmed == "breakdown":
+        print(
+            f"🔴 已收盘确认破位 {sym}：最近 {profile['confirmed_closes']} 根 {bar} K 收在支撑{args.support}下方 "
+            f"（最后收盘 {close_text}）。这是条件确认，不保证成交或后续走势。"
+        )
+    elif confirmed == "breakout":
+        print(
+            f"🟢 已收盘确认突破 {sym}：最近 {profile['confirmed_closes']} 根 {bar} K 收在阻力{args.resistance}上方 "
+            f"（最后收盘 {close_text}）。这是条件确认，不保证成交或后续走势。"
+        )
+    elif live_state == "breakdown":
+        print(
+            f"⚠️ 下破预警 {sym} {last} ≤ 支撑{args.support}，但最近已收盘 {bar} K 未满足 "
+            f"{profile['confirmed_closes']} 根确认（最后收盘 {close_text}）。"
+        )
+    elif live_state == "breakout":
+        print(
+            f"⚠️ 上破预警 {sym} {last} ≥ 阻力{args.resistance}，但最近已收盘 {bar} K 未满足 "
+            f"{profile['confirmed_closes']} 根确认（最后收盘 {close_text}）。"
+        )
+    else:
+        position = (last - args.support) / (args.resistance - args.support) * 100
+        print(
+            f"⚪区间内 {sym} {last}（支撑{args.support}~阻力{args.resistance}, 位置{position:.0f}%）；"
+            f"最后已收盘 {bar} K {close_text}，未确认突破/破位。"
+        )
+
+    if errors:
+        print("数据提示：" + "; ".join(errors))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

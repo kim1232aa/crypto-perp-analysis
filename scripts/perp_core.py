@@ -6,6 +6,37 @@ Stdlib only. NEVER fabricates: every fetch returns (data, error); callers surfac
 """
 import json, urllib.request
 
+
+# Kept in the shared module so the analysis report and the monitor agree on
+# what a "confirmed" setup means. A profile changes presentation and the
+# suggested fraction of a user-supplied risk budget; it never turns a live tick
+# into a completed candle or a guaranteed trade.
+PROFILES = {
+    "conservative": {
+        "confirmed_closes": 2,
+        "risk_fraction": 0.50,
+        "label": "等待两根已收盘K确认，回踩优先",
+    },
+    "balanced": {
+        "confirmed_closes": 1,
+        "risk_fraction": 0.75,
+        "label": "一根已收盘K确认，回踩/突破均为候选",
+    },
+    "active": {
+        "confirmed_closes": 1,
+        "risk_fraction": 1.00,
+        "label": "一根已收盘K确认后关注动量，仍不以实时越界成交",
+    },
+}
+
+
+def profile_config(name):
+    """Return a copy of a supported execution-profile configuration."""
+    key = (name or "balanced").lower()
+    if key not in PROFILES:
+        raise ValueError(f"unknown profile {name!r}; choose one of {', '.join(PROFILES)}")
+    return {"name": key, **PROFILES[key]}
+
 def get(url):
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json",
@@ -75,12 +106,69 @@ def okx_price(sym, errors):
             "low24h": num(x["low24h"]), "chg24h_pct": pct(num(x["last"]), num(x["open24h"])),
             "bid": num(x.get("bidPx")), "ask": num(x.get("askPx"))}
 def okx_candles(sym, bar, limit, errors):
+    """Fetch closed OKX candles and retain timing/confirmation metadata.
+
+    The last row in an OKX candles response can be an unfinished candle. Its
+    OHLC values can change, so it must not feed indicators, levels, alerts or a
+    backtest-style decision. ``meta`` makes the discarded rows visible to JSON
+    consumers instead of silently treating the response as fixed history.
+    """
     d, e = get(f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT-SWAP&bar={bar}&limit={limit}")
     if e: errors.append(f"OKX candles {bar}: {e}"); return None
-    if not d.get("data"): return None
-    ch = list(reversed(d["data"]))  # chronological
-    return {"highs": [num(r[2]) for r in ch], "lows": [num(r[3]) for r in ch],
-            "closes": [num(r[4]) for r in ch]}
+    if not d.get("data"):
+        errors.append(f"OKX candles {bar}: empty response")
+        return None
+
+    raw = list(reversed(d["data"]))  # chronological; OKX returns newest first
+    closed, malformed, dropped = [], 0, 0
+    last_response_ts = None
+    for r in raw:
+        try:
+            ts = int(r[0])
+            last_response_ts = ts
+            confirmed = str(r[8]) == "1"
+            if not confirmed:
+                dropped += 1
+                continue
+            candle = {
+                "timestamp": ts,
+                "confirmed": confirmed,
+                "open": num(r[1]),
+                "high": num(r[2]),
+                "low": num(r[3]),
+                "close": num(r[4]),
+                "volume": num(r[5]),
+            }
+            if None in (candle["open"], candle["high"], candle["low"], candle["close"]):
+                malformed += 1
+                continue
+            closed.append(candle)
+        except (IndexError, TypeError, ValueError):
+            malformed += 1
+
+    if not closed:
+        errors.append(f"OKX candles {bar}: no confirmed candles")
+        return None
+    if malformed:
+        errors.append(f"OKX candles {bar}: skipped {malformed} malformed row(s)")
+
+    return {
+        "timestamps": [x["timestamp"] for x in closed],
+        "confirmed": [x["confirmed"] for x in closed],
+        "opens": [x["open"] for x in closed],
+        "highs": [x["high"] for x in closed],
+        "lows": [x["low"] for x in closed],
+        "closes": [x["close"] for x in closed],
+        "volumes": [x["volume"] for x in closed],
+        "meta": {
+            "raw_count": len(raw),
+            "confirmed_count": len(closed),
+            "dropped_unconfirmed": dropped,
+            "malformed_count": malformed,
+            "last_confirmed_ts": closed[-1]["timestamp"],
+            "last_response_ts": last_response_ts,
+        },
+    }
 def okx_funding(sym, errors):
     d, e = get(f"https://www.okx.com/api/v5/public/funding-rate?instId={sym}-USDT-SWAP")
     if e: errors.append(f"OKX funding: {e}"); return None
@@ -98,16 +186,22 @@ def okx_depth_imbalance(sym, errors, band=0.005):
 
 def build_levels(cd):
     """cd = okx_candles dict -> structure + indicators."""
-    if not cd: return None
+    if not cd or len(cd.get("closes", [])) < 30: return None
     c, h, l = cd["closes"], cd["highs"], cd["lows"]; n = len(c)
     return {"candles": n,
             "swing_high_30": max(h[-30:]), "swing_low_30": min(l[-30:]),
             "swing_high_12": max(h[-12:]), "swing_low_12": min(l[-12:]),
-            "ema9": round(ema(c[-30:], 9), 4), "ema21": round(ema(c[-30:], 21), 4),
+            # Warm up the EMA with the complete returned closed history rather
+            # than restarting EMA21 from only 30 observations.
+            "ema9": round(ema(c, 9), 4), "ema21": round(ema(c, 21), 4),
             "rsi14": rsi(c), "atr14": atr(h, l, c),
             "divergence": divergence(c),
             "price_chg_window_pct": pct(c[-1], c[-13]) if n >= 13 else None,
-            "recent_closes": [round(x, 4) for x in c[-12:]]}
+            "recent_closes": [round(x, 4) for x in c[-12:]],
+            "last_candle_ts": cd["timestamps"][-1],
+            "last_candle_confirmed": bool(cd["confirmed"][-1]),
+            "candle_meta": cd.get("meta", {}),
+    }
 
 # ---------------- Binance derivatives ----------------
 def bn_derivs(sym, period, errors):
@@ -152,6 +246,80 @@ def bybit_funding(sym, errors):
     try: return num(d["result"]["list"][0]["fundingRate"])
     except: return None
 
+
+# ---------------- data quality + confirmation ----------------
+def assess_data_quality(price, levels, deriv, mtf, errors=None, depth=None,
+                        okx_funding=None, bybit_funding_rate=None):
+    """Grade whether a directional trade claim has enough live evidence.
+
+    The report may still show the available numbers when data is partial, but a
+    missing price/closed structure/multi-timeframe/primary derivatives field
+    produces ``NO_TRADE``.  This avoids converting failed API calls into a
+    neutral score and a spurious trade instruction.
+    """
+    core_missing = []
+    if not price or price.get("last") is None:
+        core_missing.append("OKX现价")
+    if not levels:
+        core_missing.append("至少30根已收盘K线")
+    elif not levels.get("last_candle_confirmed"):
+        core_missing.append("最新结构K线确认")
+
+    expected_tfs = ["5m", "15m", "1H", "4H"]
+    found = {tf: (d, r, close) for tf, d, r, close in (mtf or [])}
+    for tf in expected_tfs:
+        d, r, close = found.get(tf, (None, None, None))
+        if d is None or r is None or close is None:
+            core_missing.append(f"{tf}已收盘多周期")
+
+    deriv = deriv or {}
+    primary_derivs = {
+        "Binance资金费": deriv.get("funding_rate_8h"),
+        "Binance OI": deriv.get("oi_usd"),
+        "Binance全站账户比": (deriv.get("global_ls") or {}).get("ratio"),
+        "Binance头部持仓比": (deriv.get("top_position") or {}).get("ratio"),
+        "Taker买卖比": (deriv.get("taker_buysell") or {}).get("last"),
+    }
+    core_missing.extend(name for name, value in primary_derivs.items() if value is None)
+
+    optional_missing = []
+    if not depth or depth.get("ratio") is None:
+        optional_missing.append("OKX盘口")
+    if okx_funding is None:
+        optional_missing.append("OKX资金费")
+    if bybit_funding_rate is None:
+        optional_missing.append("Bybit资金费")
+    if (deriv.get("top_account") or {}).get("ratio") is None:
+        optional_missing.append("Binance头部账户比")
+
+    status = "NO_TRADE" if core_missing else ("CAUTION" if optional_missing else "READY")
+    return {
+        "status": status,
+        "core_missing": core_missing,
+        "optional_missing": optional_missing,
+        "error_count": len(errors or []),
+        "confirmed_structure_candles": (levels or {}).get("candles", 0),
+        "last_confirmed_candle_ts": (levels or {}).get("last_candle_ts"),
+    }
+
+
+def level_confirmation(closes, support, resistance, required_closes=1):
+    """Classify a level only after the requested number of closed candles.
+
+    ``None`` means there are not enough confirmed closes or no confirmed level
+    break.  This intentionally differs from a live-tick *warning*.
+    """
+    if required_closes < 1:
+        raise ValueError("required_closes must be >= 1")
+    if not closes or len(closes) < required_closes:
+        return None
+    tail = closes[-required_closes:]
+    if all(x <= support for x in tail):
+        return "breakdown"
+    if all(x >= resistance for x in tail):
+        return "breakout"
+    return None
+
 # ---------------- signal tagging (returns rows + score + bias) ----------------
 def _t_funding(fr):
     if fr is None: return ("—", 0)
@@ -176,24 +344,24 @@ def _t_oi(oitrend, pchg):
     if oitrend < 0 and dn: return ("价跌仓减·多头去杠杆", -0.5)
     return ("OI持平", 0)
 def _t_global(b):
-    if not b: return ("—", 0)
+    if not b or b.get("ratio") is None: return ("—", 0)
     r = b["ratio"]
-    if r > 2.0:  return ("散户极度拥挤多→强反指偏空", -1)
-    if r >= 1.3: return ("散户偏多拥挤→弱反指警惕", -0.3)
-    if r >= 0.8: return ("散户中性", 0)
-    return ("散户拥挤空→反指偏多", 1)
+    if r > 2.0:  return ("Binance全站账户偏多拥挤→反向风险", -1)
+    if r >= 1.3: return ("Binance全站账户偏多→反向风险", -0.3)
+    if r >= 0.8: return ("Binance全站账户比中性", 0)
+    return ("Binance全站账户偏空→反向线索", 1)
 def _t_toppos(b):
-    if not b: return ("—", 0)
-    r, tr = b["ratio"], b["trend"]
-    if r > 1.2: return ("主力净多" + ("·加多" if tr>0 else "·减多" if tr<0 else ""), 1.5 if tr>0 else 0.75)
-    if r < 0.8: return ("主力净空" + ("·加空" if tr<0 else "·减空" if tr>0 else ""), -1.5 if tr<0 else -0.75)
-    return ("主力中性", 0)
+    if not b or b.get("ratio") is None: return ("—", 0)
+    r, tr = b["ratio"], b.get("trend", 0)
+    if r > 1.2: return ("Binance头部持仓比净多" + ("·上升" if tr>0 else "·下降" if tr<0 else ""), 1.5 if tr>0 else 0.75)
+    if r < 0.8: return ("Binance头部持仓比净空" + ("·下降" if tr<0 else "·上升" if tr>0 else ""), -1.5 if tr<0 else -0.75)
+    return ("Binance头部持仓比中性", 0)
 def _t_topacct(b):
-    if not b: return ("—", 0)
+    if not b or b.get("ratio") is None: return ("—", 0)
     r = b["ratio"]
-    return ("大户净多" if r>1.1 else "大户净空" if r<0.9 else "大户中性", 0.5 if r>1.1 else -0.5 if r<0.9 else 0)
+    return ("Binance头部账户比净多" if r>1.1 else "Binance头部账户比净空" if r<0.9 else "Binance头部账户比中性", 0.5 if r>1.1 else -0.5 if r<0.9 else 0)
 def _t_taker(tk):
-    if not tk: return ("—", 0)
+    if not tk or tk.get("last") is None: return ("—", 0)
     l = tk["last"]
     if l > 1.2: return ("主动买盘吃单向上", 1)
     if l < 0.8: return ("主动卖盘砸盘", -1)
@@ -223,12 +391,14 @@ def signal_rows(price, levels, deriv, depth=None):
     pchgw = levels.get("price_chg_window_pct") if levels else None
     fr8 = deriv.get("funding_rate_8h")
     rows = [
-        ("资金费率", f"{(fr8 or 0)*100:.4f}%/8h", *_t_funding(fr8)),
+        # A missing funding value is evidence of a failed/unavailable source,
+        # not a zero funding rate.
+        ("资金费率", "—" if fr8 is None else f"{fr8*100:.4f}%/8h", *_t_funding(fr8)),
         ("基差",     f"{_fmt(deriv.get('basis_pct'),3)}%", *_t_basis(deriv.get("basis_pct"))),
         ("持仓量OI", f"${_fmt(deriv.get('oi_usd'),0)} 窗口{_fmt(deriv.get('oi_chg_window_pct'))}%", *_t_oi(deriv.get("oi_trend"), pchgw)),
-        ("散户多空比", _fmt((deriv.get('global_ls') or {}).get('ratio')), *_t_global(deriv.get("global_ls"))),
-        ("大户持仓比", _fmt((deriv.get('top_position') or {}).get('ratio')), *_t_toppos(deriv.get("top_position"))),
-        ("大户账户比", _fmt((deriv.get('top_account') or {}).get('ratio')), *_t_topacct(deriv.get("top_account"))),
+        ("Binance全站账户比", _fmt((deriv.get('global_ls') or {}).get('ratio')), *_t_global(deriv.get("global_ls"))),
+        ("Binance头部持仓比", _fmt((deriv.get('top_position') or {}).get('ratio')), *_t_toppos(deriv.get("top_position"))),
+        ("Binance头部账户比", _fmt((deriv.get('top_account') or {}).get('ratio')), *_t_topacct(deriv.get("top_account"))),
         ("Taker买卖比", _fmt((deriv.get('taker_buysell') or {}).get('last')), *_t_taker(deriv.get("taker_buysell"))),
         ("RSI14", _fmt((levels or {}).get('rsi14'), 0), *_t_rsi(levels)),
         ("结构均线", f"价{_fmt(price)}", *_t_struct(price, levels)),
