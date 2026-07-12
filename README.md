@@ -6,8 +6,8 @@
 
 ## 核心原则
 
-- **只用 OKX `confirm=1` 的已收盘 K 线**计算 EMA、RSI、ATR、结构位和多周期方向；JSON 中保留时间戳、确认状态及被剔除的未收盘 K 数量。
-- **数据完整性先于方向**：`NO_TRADE` 表示价格、闭合结构 K、多周期或核心衍生品数据不足；`CAUTION` 表示辅助来源缺失；`READY` 只表示本次数据完整，不代表应该交易或策略有效。
+- **只用 OKX `confirm=1` 的已收盘 K 线**计算 EMA、RSI、ATR、结构位、主周期评分和多周期方向；JSON 中保留时间戳、连续性/新鲜度及被剔除的未收盘 K 数量。
+- **数据完整性先于方向**：`NO_TRADE` 表示价格、闭合结构 K、多周期、时效/连续性或核心衍生品数据不足；此时 `bias/score/resonance=null`，候选与仓位为空。`CAUTION` 表示辅助来源缺失；`READY` 只表示本次数据完整及时，不代表应该交易或策略有效。
 - **实时价格越界只是预警**。`alert.py` 只有在显式传入 `--confirm-closed BAR` 后，才会按已收盘 K 给出确认突破/破位。
 - **费用、滑点、资金费和仓位只是输入估算**，不是成交承诺或实盘回测结果。
 
@@ -26,7 +26,7 @@ python3 scripts/analyze.py BTC 15m --profile active
 python3 scripts/analyze.py ETH 5m --fee-bps 4 --slippage-bps 2 \
   --risk-pct 0.5 --account-equity 10000
 
-# 多币扫描：只有核心数据完整的标的才参与评分排名
+# 多币扫描：同样检查 5m/15m/1H/4H、核心衍生品和辅助源；只有 READY 参与排名
 python3 scripts/scan.py BTC,ETH,SOL 15m
 
 # 默认仅实时预警，不是交易触发
@@ -53,14 +53,14 @@ python3 scripts/alert.py ETH 1785 1796 --confirm-closed 5m --profile balanced
 `analyze.py` 输出三层信息：
 
 1. **数据质量**：核心缺失时明确给出 `NO_TRADE`，不会把失败的接口当作中性数据或将 funding 显示为零。
-2. **结构化证据**：多周期表、机械评分、衍生品面板、跨所资金费及已收盘结构位。机械评分是手工规则，不是概率预测。
+2. **结构化证据**：多周期表、机械评分、带来源时间的衍生品面板、按真实结算周期及 8h 等效值展示的跨所资金费、已收盘结构位。机械评分是手工规则，不是概率预测。
 3. **候选情景与执行估算**：回踩、确认突破、确认破位、阻力被拒等条件；费用、滑点、资金费、风险预算和近似仓位公式会单独显示。候选情景并非指令，R:R 仅为结构距离，未替代实际成交成本。
 
-最后输出 JSON，包含 `data_quality`、`profile`、K 线元数据、候选情景和执行假设，方便其他程序或模型自由使用证据，而不是照抄一段固定结论。
+最后输出带 `schema_version` 的 JSON。稳定顶层字段包含 `asset_class`、`instrument`、`as_of`、`profile`、`data_quality`、`can_form_direction`、`can_size`、`reference_levels`、`candidates` 和 `no_trade`，方便其他程序或模型自由使用证据。`NO_TRADE` 时方向、候选和仓位均为空。
 
 ## 本地 OHLC 回放（有限验证）
 
-`scripts/backtest.py` 用本地 CSV/JSON/JSONL 的 OHLC **决策日志**回放价格执行层：决策在一根 K 收盘时已知，最早从下一根开盘成交；可显式输入手续费、滑点和逐 K 资金费。
+`scripts/backtest.py` 用本地 CSV/JSON/JSONL 的 OHLC **决策日志**回放价格执行层：决策在一根 K 收盘时已知，最早从下一根开盘成交；跳空穿越止损按开盘处理，并输出逐 K 收盘盯市权益、MTM/已平仓回撤、MAE/MFE，以及分拆的手续费、滑点和逐 K 资金费。
 
 ```bash
 python3 scripts/backtest.py path/to/decision-log.csv --profile balanced \
@@ -73,7 +73,9 @@ python3 scripts/backtest.py --self-test
 ## 安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kim1232aa/crypto-perp-analysis/main/install.sh | bash
+git clone --depth 1 https://github.com/kim1232aa/crypto-perp-analysis.git
+cd crypto-perp-analysis
+bash install.sh auto
 ```
 
 或手动克隆：

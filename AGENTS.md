@@ -31,12 +31,13 @@ python3 scripts/alert.py ETH 1785 1796
 python3 scripts/alert.py ETH 1785 1796 --confirm-closed 5m --profile balanced
 ```
 
-`conservative` requires two closed candles and uses 50% of a user-supplied risk cap; `balanced` (default) requires one and uses 75%; `active` requires one and uses 100%. The tool never assumes a risk percentage: omit `--risk-pct` to receive only the sizing formula.
+`conservative` requires two closed candles, uses 50% of a user-supplied risk cap and a recorded backtest score threshold of 3; `balanced` (default) uses one/75%/1; `active` uses one/100%/0.25. The tool never assumes a risk percentage: omit `--risk-pct` to receive only the sizing formula.
 
 ## Data and response rules
 
-- K-derived numbers use **only OKX `confirm=1` closed candles**. JSON retains candle timestamps, confirmation metadata and the count of discarded open candles.
-- Treat `NO_TRADE` as a hard data gate: do not turn missing price, closed structure, multi-timeframe or primary derivatives fields into a direction. `CAUTION` means auxiliary inputs are missing. `READY` means fields are present, **not** that the setup is backtested or actionable.
+- K-derived numbers use **only OKX `confirm=1` closed candles**. JSON retains timestamps, continuity/freshness metadata and the count of discarded open candles. Stale, duplicated or discontinuous core series fail the data gate.
+- Treat `NO_TRADE` as a hard data gate: `bias`, aggregate resonance and score become `null`, while candidates and sizing are empty. Raw source evidence remains available for model/user inspection. `CAUTION` means auxiliary inputs are missing. `READY` means fields are present and timely, **not** that the setup is backtested or actionable.
+- The versioned JSON exposes stable top-level `asset_class`, `instrument`, `as_of`, `profile`, `data_quality`, `can_form_direction`, `can_size`, `reference_levels`, `candidates`, and `no_trade` fields. Read the gate before interpreting evidence.
 - Never invent a price, indicator, funding rate or source that is missing. Explain source failures and data timing.
 - The output is structured evidence, not a mandatory verbatim response. You may summarize, compare or reason from it in the user's language, but preserve the values you cite and leave room for model/user judgment.
 - Do not label a condition as a high-probability/winning trade. Candidate scenarios are conditions; they do not select a sole action.
@@ -44,9 +45,9 @@ python3 scripts/alert.py ETH 1785 1796 --confirm-closed 5m --profile balanced
 
 ## Execution caveats
 
-`analyze.py` displays user-overridable fee/slippage assumptions, current funding and optional sizing math. These are **not backtest results**, fills or an exchange quote. R:R is structural distance and excludes unknown execution effects unless explicitly modelled.
+`analyze.py` displays user-overridable fee/slippage assumptions, each venue's current funding interval, an 8-hour-equivalent comparison and optional sizing math. These are **not backtest results**, fills or an exchange quote. R:R is structural distance and excludes unknown execution effects unless explicitly modelled.
 
-`scripts/backtest.py` can replay the **price-execution layer of a local OHLC decision log** (signal at close, fill no earlier than next open) with fee/slippage/funding inputs:
+`scripts/backtest.py` can replay the **price-execution layer of a local OHLC decision log** (signal at close, fill no earlier than next open), with gap-aware stops, bar-close mark-to-market drawdown, MAE/MFE and split fee/slippage/funding inputs:
 
 ```bash
 python3 scripts/backtest.py path/to/decision-log.csv --profile balanced

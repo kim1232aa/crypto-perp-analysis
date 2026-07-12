@@ -6,6 +6,7 @@ execution assumptions.  It is not a backtester and it does not select a single
 mandatory trade for an agent or a user.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 
 import perp_core as pc
@@ -14,6 +15,7 @@ import perp_core as pc
 VALID_BARS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 OKX_BAR = {"1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D"}
 MTF_LADDER = (("5m", "5m"), ("15m", "15m"), ("1H", "1H"), ("4H", "4H"))
+SCHEMA_VERSION = "1.0"
 
 
 def bar_arg(value):
@@ -23,11 +25,17 @@ def bar_arg(value):
     return bar
 
 
+def symbol_arg(value):
+    symbol = value.strip().upper()
+    if not 2 <= len(symbol) <= 20 or not symbol.isalnum():
+        raise argparse.ArgumentTypeError("币种必须是 2-20 位字母或数字，例如 ETH、BTC、1000PEPE")
+    return symbol
+
+
 def non_negative(value):
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("必须是数字") from exc
+    number = pc.num(value)
+    if number is None:
+        raise argparse.ArgumentTypeError("必须是有限数字")
     if number < 0:
         raise argparse.ArgumentTypeError("不能为负数")
     return number
@@ -45,7 +53,7 @@ def parse_args():
         description="永续合约结构化证据快照（非回测、非交易指令）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("symbol", nargs="?", default="ETH", help="币种，例如 ETH/BTC/SOL")
+    parser.add_argument("symbol", nargs="?", type=symbol_arg, default="ETH", help="币种，例如 ETH/BTC/SOL")
     parser.add_argument("bar", nargs="?", type=bar_arg, default="5m", help="主分析周期")
     parser.add_argument(
         "--profile", choices=tuple(pc.PROFILES), default="balanced",
@@ -72,7 +80,7 @@ def parse_args():
 
 def mtf_resonance(mtf):
     """Do not call a partial ladder a full multi-timeframe resonance."""
-    dirs = [direction for _, direction, _, _ in mtf if direction is not None]
+    dirs = [item[1] for item in mtf if item[1] is not None]
     if len(dirs) != len(MTF_LADDER):
         return "数据不完整·不声明多周期共振"
     if all(direction > 0 for direction in dirs):
@@ -104,6 +112,9 @@ def rr_text(value):
 
 
 def candidate(name, trigger, entry, stop, targets, rr):
+    prices = [entry, stop, *targets]
+    if any(pc.num(value) is None or value <= 0 for value in prices):
+        return None
     return {
         "name": name,
         "trigger": trigger,
@@ -115,7 +126,7 @@ def candidate(name, trigger, entry, stop, targets, rr):
     }
 
 
-def execution_summary(args, profile, funding_rate, candidates):
+def execution_summary(args, profile, funding, candidates, actionable=True):
     """Return explicit, non-backtested execution assumptions and sizing maths."""
     one_way_bps = args.fee_bps + args.slippage_bps
     round_trip_bps = one_way_bps * 2
@@ -124,15 +135,18 @@ def execution_summary(args, profile, funding_rate, candidates):
         "fee_bps_each_way": args.fee_bps,
         "slippage_bps_each_way": args.slippage_bps,
         "estimated_round_trip_bps": round_trip_bps,
-        "funding_rate_8h": funding_rate,
+        "funding_rate": funding.get("funding_rate"),
+        "funding_interval_hours": funding.get("funding_interval_hours"),
+        "funding_rate_8h_equiv": funding.get("funding_rate_8h_equiv"),
         "risk_pct_input": args.risk_pct,
         "profile_risk_fraction": profile["risk_fraction"],
         "effective_risk_pct": effective_risk_pct,
         "account_equity": args.account_equity,
         "sizing": [],
+        "sizing_enabled": bool(actionable),
         "disclaimer": "成本/滑点/资金费为输入估算，非实盘回测或成交保证。",
     }
-    if args.account_equity is None or effective_risk_pct is None:
+    if not actionable or args.account_equity is None or effective_risk_pct is None:
         return out
 
     risk_budget = args.account_equity * effective_risk_pct / 100
@@ -160,8 +174,13 @@ def render_execution_summary(execution):
         f"单边滑点 {execution['slippage_bps_each_way']:.2f}bp ｜ "
         f"往返成本估算 {execution['estimated_round_trip_bps']:.2f}bp"
     )
-    funding = execution["funding_rate_8h"]
-    funding_text = "—（数据缺失，不计入R:R）" if funding is None else f"{funding * 100:.4f}%/8h（持仓跨结算时另计）"
+    funding = execution["funding_rate"]
+    interval = execution["funding_interval_hours"]
+    funding_text = (
+        "—（数据缺失，不计入R:R）"
+        if funding is None or interval is None
+        else f"{funding * 100:.4f}%/{interval:g}h（持仓跨结算时另计）"
+    )
     print(f"Binance 最新资金费 {funding_text}")
     if execution["risk_pct_input"] is None:
         print(f"用户风险上限：未提供（档位系数 {execution['profile_risk_fraction']:.2f} 不单独构成风险偏好）。")
@@ -171,7 +190,9 @@ def render_execution_summary(execution):
             f"{execution['profile_risk_fraction']:.2f} = 估算有效风险上限 "
             f"{execution['effective_risk_pct']:.3f}%"
         )
-    if execution["account_equity"] is None or execution["effective_risk_pct"] is None:
+    if not execution["sizing_enabled"]:
+        print("数据质量为 NO_TRADE：仓位估算已由硬闸门禁用。")
+    elif execution["account_equity"] is None or execution["effective_risk_pct"] is None:
         print("仓位公式：账户权益 × 有效风险上限 ÷（进场至止损距离 + 进场价×往返成本）。同时提供 --risk-pct 和 --account-equity 才生成近似值。")
     else:
         print("| 候选情景 | 风险预算(USDT) | 每标的单位估算亏损 | 近似标的数量 | 近似名义价值 |")
@@ -187,7 +208,7 @@ def render_execution_summary(execution):
 
 def main():
     args = parse_args()
-    sym = args.symbol.upper()
+    sym = args.symbol
     bar = args.bar
     okx_bar = OKX_BAR.get(bar, bar)
     profile = pc.profile_config(args.profile)
@@ -206,24 +227,34 @@ def main():
     for label, tf_bar in MTF_LADDER:
         series = candles if tf_bar == okx_bar else pc.okx_candles(sym, tf_bar, 200, errors)
         if not series or len(series["closes"]) < 30:
-            mtf.append((label, None, None, None))
+            mtf.append((label, None, None, None, (series or {}).get("meta", {})))
+            continue
+        series_meta = series.get("meta", {})
+        if series_meta.get("continuity_ok") is not True or series_meta.get("freshness_ok") is not True:
+            mtf.append((label, None, None, None, series_meta))
             continue
         closes = series["closes"]
         e9, e21, rsi_value = pc.ema(closes, 9), pc.ema(closes, 21), pc.rsi(closes)
         direction = 1 if closes[-1] > e9 > e21 else -1 if closes[-1] < e9 < e21 else 0
-        mtf.append((label, direction, rsi_value, closes[-1]))
+        mtf.append((label, direction, rsi_value, closes[-1], series_meta))
 
-    pv = price["last"] if price else (levels["recent_closes"][-1] if levels else None)
-    rows, total, bias = pc.signal_rows(pv, levels, deriv, depth)
+    pv = price["last"] if price else (levels["last_close"] if levels else None)
+    scoring_price = levels.get("last_close") if levels else None
+    rows, raw_total, raw_bias = pc.signal_rows(scoring_price, levels, deriv, depth)
     quality = pc.assess_data_quality(
         price, levels, deriv, mtf, errors=errors, depth=depth,
         okx_funding=okx_funding, bybit_funding_rate=bybit_funding,
     )
-    resonance = mtf_resonance(mtf)
+    actionable = quality["status"] != "NO_TRADE"
+    total, bias = (raw_total, raw_bias) if actionable else (None, None)
+    resonance = mtf_resonance(mtf) if actionable else None
 
     print(f"===== {sym}/USDT PERP · {bar} · STRUCTURED EVIDENCE =====")
     if price:
-        print(f"现价 {fmt(price['last'])} | 24h {fmt(price['chg24h_pct'])}% | 高 {fmt(price['high24h'])} 低 {fmt(price['low24h'])}")
+        print(
+            f"现价 {pc.format_price(price['last'])} | 24h {fmt(price['chg24h_pct'])}% | "
+            f"高 {pc.format_price(price['high24h'])} 低 {pc.format_price(price['low24h'])} | ts {price.get('timestamp')}"
+        )
     if levels:
         meta = levels.get("candle_meta", {})
         print(
@@ -239,53 +270,72 @@ def main():
     if quality["optional_missing"]:
         print("辅助缺失：" + "、".join(quality["optional_missing"]))
     if quality["status"] == "NO_TRADE":
-        print("操作状态：**NO_TRADE**。下方仅保留可用的结构化证据/候选价位，不生成交易指令。")
+        print("操作状态：**NO_TRADE**。仅保留原始结构化证据；方向汇总、候选情景和仓位估算已禁用。")
     elif quality["status"] == "CAUTION":
         print("操作状态：**CAUTION**。核心证据齐全，但应明确考虑缺失的辅助来源。")
     else:
         print("操作状态：**READY（数据完整性）**。READY 不代表策略经回测验证或应当交易。")
 
-    print(f"\n**多周期证据：{resonance}**")
+    resonance_text = resonance or "未汇总（NO_TRADE 数据硬闸门）"
+    print(f"\n**多周期证据：{resonance_text}**")
     print("| 周期 | 方向 | RSI | 最后已收盘价 |")
     print("|---|---|---:|---:|")
-    for tf, direction, rsi_value, close in mtf:
-        print(f"| {tf} | {direction_text(direction)} | {fmt(rsi_value, 0)} | {fmt(close)} |")
+    for tf, direction, rsi_value, close, _meta in mtf:
+        print(f"| {tf} | {direction_text(direction)} | {fmt(rsi_value, 0)} | {pc.format_price(close)} |")
 
-    print(f"\n**机械评分 {total} → 偏向证据:{bias}**（手工规则，非预测概率或交易命令）\n")
+    score_text = f"{total} → 偏向证据:{bias}" if actionable else "未启用（NO_TRADE）"
+    print(f"\n**机械评分 {score_text}**（手工规则，非预测概率或交易命令）\n")
     print("| 指标 | 数值 | 解读 | 倾向 |")
     print("|---|---|---|---|")
     for name, value, description, score in rows:
-        print(f"| {name} | {value} | {description} | {pc.bias_emoji(score)} |")
+        tendency = pc.bias_emoji(score) if actionable else "未评分"
+        print(f"| {name} | {value} | {description} | {tendency} |")
     if levels and levels.get("divergence"):
-        side = "偏空🔻" if "偏空" in levels["divergence"] else "偏多✅"
+        side = ("偏空🔻" if "偏空" in levels["divergence"] else "偏多✅") if actionable else "未评分"
         print(f"| RSI背离 | — | {levels['divergence']} | {side} |")
 
-    def funding_text(value):
-        return "—" if value is None else f"{value * 100:.4f}%"
+    def funding_text(snapshot):
+        if not isinstance(snapshot, dict) or snapshot.get("rate") is None:
+            return "—"
+        interval = snapshot.get("interval_hours")
+        raw = f"{snapshot['rate'] * 100:.4f}%/{interval:g}h" if interval else f"{snapshot['rate'] * 100:.4f}%/周期未知"
+        normalized = snapshot.get("rate_8h_equiv")
+        return raw if normalized is None or interval == 8 else f"{raw}（8h等效 {normalized * 100:.4f}%）"
+
+    binance_funding = {
+        "rate": deriv.get("funding_rate"),
+        "interval_hours": deriv.get("funding_interval_hours"),
+        "rate_8h_equiv": deriv.get("funding_rate_8h_equiv"),
+    }
 
     print(
         f"\n**跨所资金费（接口快照）**  OKX {funding_text(okx_funding)} ｜ "
-        f"Binance {funding_text(deriv.get('funding_rate_8h'))} ｜ Bybit {funding_text(bybit_funding)}"
+        f"Binance {funding_text(binance_funding)} ｜ Bybit {funding_text(bybit_funding)}"
     )
-    funding_values = [value for value in (okx_funding, deriv.get("funding_rate_8h"), bybit_funding) if value is not None]
+    funding_values = [
+        snapshot.get("rate_8h_equiv")
+        for snapshot in (okx_funding, binance_funding, bybit_funding)
+        if isinstance(snapshot, dict) and snapshot.get("rate_8h_equiv") is not None
+    ]
     if len(funding_values) >= 2:
         spread = (max(funding_values) - min(funding_values)) * 100
-        print(f"乖离 {spread:.4f}%（快照比较；各交易所实际结算周期需自行核实）")
+        print(f"8h 等效乖离 {spread:.4f}%（按各所当前结算周期归一；仍需核实结算规则）")
 
     candidates = []
-    if levels and pv:
+    invalid_candidates = []
+    if actionable and levels and pv:
         sh30, sl30 = levels["swing_high_30"], levels["swing_low_30"]
         sh12, sl12 = levels["swing_high_12"], levels["swing_low_12"]
         atr_value = levels.get("atr14") or 0
-        digits = 0 if pv > 100 else 2
-        quote = lambda number: f"{number:.{digits}f}"
+        quote = pc.format_price
         unit = atr_value if atr_value > 0 else max((sh30 - sl30) * 0.1, pv * 0.002)
         projected_range = max(sh30 - sl30, 2 * unit)
         confirmation = profile["confirmed_closes"]
 
-        candidates = [
+        proposed = [
             candidate(
-                "低多回踩", f"回踩 {quote(sl12)} 后出现已收盘K企稳", sl12, sl12 - 1.2 * unit,
+                "低多回踩", f"回踩 {quote(sl12)} 后由 {confirmation} 根 {bar} 已收盘K确认企稳",
+                sl12, sl12 - 1.2 * unit,
                 [sh12, sh30], rr_value(sh30 - sl12, 1.2 * unit),
             ),
             candidate(
@@ -297,11 +347,16 @@ def main():
                 [sl12 - projected_range], rr_value(projected_range, 1.2 * unit),
             ),
             candidate(
-                "阻力空", f"{confirmation} 根 {bar} 已收盘K在 {quote(sh30)} 下方收回/被拒", sh30, sh30 + 1.2 * unit,
+                "阻力空", f"先触及 {quote(sh30)}，再由 {confirmation} 根 {bar} 已收盘K收回其下方",
+                sh30, sh30 + 1.2 * unit,
                 [sl12], rr_value(sh30 - sl12, 1.2 * unit),
             ),
         ]
-        location = (pv - sl30) / projected_range if projected_range > 0 else 0.5
+        names = ["低多回踩", "突破多", "破位空", "阻力空"]
+        candidates = [item for item in proposed if item is not None]
+        invalid_candidates = [name for name, item in zip(names, proposed) if item is None]
+        location_range = sh30 - sl30
+        location = (pv - sl30) / location_range if location_range > 0 else 0.5
         location_note = (
             "现价靠近30根区间上沿：回踩与确认突破都是候选，不自动否定动量。"
             if location > 0.8 else
@@ -326,12 +381,14 @@ def main():
                 f"| {item['name']} | {item['trigger']} | {quote(item['entry'])} | "
                 f"{quote(item['stop'])} | {targets} | {rr_text(item['rr_structural'])} |"
             )
+        if invalid_candidates:
+            print("已跳过含非正数止损/目标的候选：" + "、".join(invalid_candidates))
         print(f"总开关（结构观察位）{quote(sl12)}：只在已收盘确认后评估，不把实时触价当作成交信号。")
 
-    execution = execution_summary(args, profile, deriv.get("funding_rate_8h"), candidates)
+    execution = execution_summary(args, profile, deriv, candidates, actionable=actionable)
     render_execution_summary(execution)
 
-    drivers = sorted((row for row in rows if row[3] != 0), key=lambda row: -abs(row[3]))[:4]
+    drivers = sorted((row for row in rows if actionable and row[3] != 0), key=lambda row: -abs(row[3]))[:4]
     if drivers:
         print("\n**结构化证据摘要（留给模型/交易者判断，不强制唯一结论）**")
         print("；".join(f"{name}：{description}" for name, _, description, _ in drivers))
@@ -342,17 +399,45 @@ def main():
         for error in errors:
             print("-", error)
 
+    reference_levels = {}
+    if levels:
+        reference_levels = {
+            "current_price": pv,
+            "last_confirmed_close": levels.get("last_close"),
+            "resistance": [levels.get("swing_high_12"), levels.get("swing_high_30")],
+            "support": [levels.get("swing_low_12"), levels.get("swing_low_30")],
+            "ema9": levels.get("ema9"),
+            "ema21": levels.get("ema21"),
+            "atr14": levels.get("atr14"),
+            "last_confirmed_candle_ts": levels.get("last_candle_ts"),
+        }
     out = {
+        "schema_version": SCHEMA_VERSION,
+        "asset_class": "crypto_perpetual",
+        "instrument": {
+            "symbol": f"{sym}-USDT-SWAP",
+            "base": sym,
+            "quote": "USDT",
+            "primary_venue": "OKX",
+        },
+        "as_of": datetime.now(timezone.utc).isoformat(),
         "symbol": sym,
         "bar": bar,
         "profile": profile,
+        "profile_name": profile["name"],
+        "can_form_direction": actionable,
+        "can_size": bool(candidates),
+        "reference_levels": reference_levels,
+        "no_trade": not actionable,
+        "no_trade_reasons": quality["core_missing"] if not actionable else [],
         "price": price,
         "structure": levels,
         "okx_funding": okx_funding,
         "bybit_funding": bybit_funding,
         "derivatives": deriv,
         "depth": depth,
-        "mtf": [{"tf": tf, "dir": direction, "rsi": rsi_value, "close": close} for tf, direction, rsi_value, close in mtf],
+        "mtf": [{"tf": tf, "dir": direction, "rsi": rsi_value, "close": close, "meta": meta}
+                for tf, direction, rsi_value, close, meta in mtf],
         "resonance": resonance,
         "bias_score": total,
         "bias": bias,
@@ -362,7 +447,7 @@ def main():
         "errors": errors,
     }
     print("\n----- JSON -----")
-    print(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
+    print(json.dumps(out, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
 
 if __name__ == "__main__":

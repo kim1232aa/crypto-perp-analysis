@@ -24,7 +24,11 @@ install_into() {  # $1 = skills root; prints final dest on stdout, progress on s
   local dest="$1/$NAME"
   mkdir -p "$1"
   if [ -d "$dest/.git" ]; then
-    echo "  ↻ update $dest" >&2; git -C "$dest" pull --ff-only -q || true
+    echo "  ↻ update $dest" >&2
+    if ! git -C "$dest" pull --ff-only -q; then
+      echo "✗ update failed for $dest; refusing to test a stale checkout" >&2
+      return 1
+    fi
   else
     echo "  ↓ clone  $dest" >&2; git clone --depth 1 -q "$REPO" "$dest"
   fi
@@ -67,14 +71,16 @@ if python3 -B -m unittest discover -s "$first/tests" -q && \
    python3 -B "$first/scripts/backtest.py" --self-test >/dev/null; then
   echo "✅ offline checks passed."
 else
-  echo "⚠️ installed, but offline checks failed; inspect the repository before relying on output."
+  echo "✗ installed, but offline checks failed; refusing to report a usable installation."
+  exit 1
 fi
 
 echo "→ live connectivity check: analyze.py ETH 5m (needs network to OKX/Binance/Bybit)"
-if python3 "$first/scripts/analyze.py" ETH 5m 2>/dev/null | grep -q "STRUCTURED EVIDENCE"; then
-  echo "✅ works — live data reachable."
+live_output="$(python3 "$first/scripts/analyze.py" ETH 5m 2>/dev/null || true)"
+if printf '%s\n' "$live_output" | grep -Eq '"status":"(READY|CAUTION)"'; then
+  echo "✅ works — core live data reachable (check READY/CAUTION details in a normal run)."
 else
-  echo "⚠️ installed, but live check produced no structured evidence (exchanges may be geo/blocked)."
+  echo "⚠️ installed, but live check is NO_TRADE or unavailable (exchanges may be geo/blocked)."
   echo "   retry: HTTPS_PROXY=http://<proxy>:<port> python3 $first/scripts/analyze.py ETH 5m"
 fi
 echo "→ restart your agent (Claude Code / Codex / OpenClaw / Hermes) to auto-discover the skill."

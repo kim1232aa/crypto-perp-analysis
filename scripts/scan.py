@@ -7,6 +7,7 @@ import perp_core as pc
 
 VALID_BARS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 OKX_BAR = {"1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D"}
+MTF_LADDER = (("5m", "5m"), ("15m", "15m"), ("1H", "1H"), ("4H", "4H"))
 
 
 def bar_arg(value):
@@ -29,7 +30,8 @@ def parse_args():
 def missing_primary_derivatives(deriv):
     deriv = deriv or {}
     required = {
-        "资金费": deriv.get("funding_rate_8h"),
+        "资金费": deriv.get("funding_rate"),
+        "资金费周期": deriv.get("funding_interval_hours"),
         "OI": deriv.get("oi_usd"),
         "Binance全站账户比": (deriv.get("global_ls") or {}).get("ratio"),
         "Binance头部持仓比": (deriv.get("top_position") or {}).get("ratio"),
@@ -46,25 +48,46 @@ def main():
     for symbol in symbols:
         errors = []
         price = pc.okx_price(symbol, errors)
-        candles = pc.okx_candles(symbol, OKX_BAR.get(args.bar, args.bar), 200, errors)
+        okx_bar = OKX_BAR.get(args.bar, args.bar)
+        candles = pc.okx_candles(symbol, okx_bar, 200, errors)
         levels = pc.build_levels(candles)
         deriv = pc.bn_derivs(symbol, args.bar, errors)
-        if not price or not levels:
-            results.append({"symbol": symbol, "status": "NO_TRADE", "reason": "缺少现价或30根已收盘K", "errors": errors})
-            continue
-        missing = missing_primary_derivatives(deriv)
-        rows, total, bias = pc.signal_rows(price["last"], levels, deriv)
-        strongest = sorted((row for row in rows if row[3] != 0), key=lambda row: -abs(row[3]))[:2]
-        reason = " / ".join(f"{row[0]}:{row[2]}" for row in strongest) or "信号平淡"
-        if missing:
-            results.append({
-                "symbol": symbol, "price": price["last"], "change": price["chg24h_pct"], "rsi": levels.get("rsi14"),
-                "status": "CAUTION", "score": None, "bias": "不排名", "reason": "核心缺失：" + "、".join(missing), "errors": errors,
-            })
-            continue
+        depth = pc.okx_depth_imbalance(symbol, errors)
+        okx_funding = pc.okx_funding(symbol, errors)
+        bybit_funding = pc.bybit_funding(symbol, errors)
+
+        mtf = []
+        for label, tf_bar in MTF_LADDER:
+            series = candles if tf_bar == okx_bar else pc.okx_candles(symbol, tf_bar, 200, errors)
+            meta = (series or {}).get("meta", {})
+            if (not series or len(series.get("closes", [])) < 30
+                    or meta.get("continuity_ok") is not True or meta.get("freshness_ok") is not True):
+                mtf.append((label, None, None, None, meta))
+                continue
+            closes = series["closes"]
+            e9, e21, rsi_value = pc.ema(closes, 9), pc.ema(closes, 21), pc.rsi(closes)
+            direction = 1 if closes[-1] > e9 > e21 else -1 if closes[-1] < e9 < e21 else 0
+            mtf.append((label, direction, rsi_value, closes[-1], meta))
+
+        quality = pc.assess_data_quality(
+            price, levels, deriv, mtf, errors=errors, depth=depth,
+            okx_funding=okx_funding, bybit_funding_rate=bybit_funding,
+        )
+        scoring_price = levels.get("last_close") if levels else None
+        rows, raw_total, raw_bias = pc.signal_rows(scoring_price, levels, deriv, depth)
+        status = quality["status"]
+        score, bias = (raw_total, raw_bias) if status == "READY" else (None, "不排名")
+        if quality["core_missing"]:
+            reason = "核心缺失：" + "、".join(quality["core_missing"])
+        elif quality["optional_missing"]:
+            reason = "辅助缺失：" + "、".join(quality["optional_missing"])
+        else:
+            strongest = sorted((row for row in rows if row[3] != 0), key=lambda row: -abs(row[3]))[:2]
+            reason = " / ".join(f"{row[0]}:{row[2]}" for row in strongest) or "信号平淡"
         results.append({
-            "symbol": symbol, "price": price["last"], "change": price["chg24h_pct"], "rsi": levels.get("rsi14"),
-            "status": "READY", "score": total, "bias": bias, "reason": reason, "errors": errors,
+            "symbol": symbol, "price": (price or {}).get("last"), "change": (price or {}).get("chg24h_pct"),
+            "rsi": (levels or {}).get("rsi14"), "status": status, "score": score, "bias": bias,
+            "reason": reason, "quality": quality, "errors": errors,
         })
 
     ready = sorted((row for row in results if row["status"] == "READY"), key=lambda row: -row["score"])
@@ -75,22 +98,22 @@ def main():
     print("|---|---|---|---:|---:|---:|---:|---|---|")
     for index, row in enumerate(ready, 1):
         print(
-            f"| {index} | {row['symbol']} | READY | {fmt(row['price'])} | {fmt(row['change'])} | "
+            f"| {index} | {row['symbol']} | READY | {pc.format_price(row['price'])} | {fmt(row['change'])} | "
             f"{fmt(row['rsi'], 0)} | {fmt(row['score'])} | {row['bias']} | {row['reason']} |"
         )
     for row in other:
         print(
-            f"| — | {row['symbol']} | {row['status']} | {fmt(row.get('price'))} | {fmt(row.get('change'))} | "
+            f"| — | {row['symbol']} | {row['status']} | {pc.format_price(row.get('price'))} | {fmt(row.get('change'))} | "
             f"{fmt(row.get('rsi'), 0)} | — | 不排名 | {row['reason']} |"
         )
 
     if ready:
         print(f"\n最偏多证据：{ready[0]['symbol']}（评分 {fmt(ready[0]['score'])}）｜最偏空证据：{ready[-1]['symbol']}（评分 {fmt(ready[-1]['score'])}）")
-        print(f"深入查看：python3 analyze.py {ready[0]['symbol']} {args.bar} --profile balanced")
+        print(f"深入查看：python3 scripts/analyze.py {ready[0]['symbol']} {args.bar} --profile balanced")
     else:
         print("\n没有核心数据完整的标的；不输出方向排名。")
     error_count = sum(len(row.get("errors", [])) for row in results)
-    print(f"\n⚠️ 扫描使用已收盘K和部分衍生品快照，非回测/非交易建议；共记录 {error_count} 项源错误。")
+    print(f"\n⚠️ 扫描使用已收盘多周期K、核心衍生品与辅助快照，非回测/非交易建议；共记录 {error_count} 项源错误。")
 
 
 if __name__ == "__main__":

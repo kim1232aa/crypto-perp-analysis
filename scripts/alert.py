@@ -16,14 +16,21 @@ def bar_arg(value):
     return bar
 
 
+def positive_level(value):
+    number = pc.num(value)
+    if number is None or number <= 0:
+        raise argparse.ArgumentTypeError("价位必须是大于 0 的有限数字")
+    return number
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="触发位监控：默认只给实时预警；--confirm-closed 才给已收盘确认。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("symbol", help="币种，例如 ETH")
-    parser.add_argument("support", type=float, help="支撑/下破观察位")
-    parser.add_argument("resistance", type=float, help="阻力/上破观察位")
+    parser.add_argument("support", type=positive_level, help="支撑/下破观察位")
+    parser.add_argument("resistance", type=positive_level, help="阻力/上破观察位")
     parser.add_argument(
         "--confirm-closed", type=bar_arg, metavar="BAR",
         help="以指定周期的已收盘K确认；未指定时绝不输出交易触发",
@@ -44,8 +51,8 @@ def main():
     profile = pc.profile_config(args.profile)
     errors = []
     price = pc.okx_price(sym, errors)
-    if not price or price.get("last") is None:
-        detail = "; ".join(errors) or "空响应"
+    if not price or price.get("last") is None or price.get("freshness_ok") is not True:
+        detail = "; ".join(errors) or "空响应或时间戳过期"
         print(f"⚠️ {sym} 价格获取失败（不生成信号）：{detail}")
         return 1
 
@@ -61,13 +68,20 @@ def main():
             print(f"⚠️ 上破预警 {sym} {last} ≥ 阻力{args.resistance}：实时触价，未做已收盘确认；非交易触发。")
         else:
             position = (last - args.support) / (args.resistance - args.support) * 100
-            print(f"⚪区间内 {sym} {last}（支撑{args.support}~阻力{args.resistance}, 位置{position:.0f}%）24h {price['chg24h_pct']:.2f}%")
+            change = pc._fmt(price.get("chg24h_pct"))
+            print(f"⚪区间内 {sym} {last}（支撑{args.support}~阻力{args.resistance}, 位置{position:.0f}%）24h {change}%")
         print("提示：如需已收盘确认，使用 --confirm-closed 5m（可配 --profile）。")
         return 0
 
     bar = args.confirm_closed
     candles = pc.okx_candles(sym, OKX_BAR.get(bar, bar), max(5, profile["confirmed_closes"] + 2), errors)
-    closes = candles["closes"] if candles else []
+    candle_meta = (candles or {}).get("meta", {})
+    if (not candles or candle_meta.get("continuity_ok") is not True
+            or candle_meta.get("freshness_ok") is not True):
+        detail = "; ".join(errors) or "已收盘K缺失、断档或过期"
+        print(f"⚠️ {sym} {bar} 已收盘确认数据不可用（不生成确认信号）：{detail}")
+        return 1
+    closes = candles["closes"]
     confirmed = pc.level_confirmation(closes, args.support, args.resistance, profile["confirmed_closes"])
     close_text = "—" if not closes else f"{closes[-1]}（ts {candles['timestamps'][-1]}）"
 
